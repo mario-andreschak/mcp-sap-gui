@@ -174,3 +174,8 @@ credentials.env
 *.png
 package-lock.json
 package-lock.json
+
+# Local credentials and lint cache
+.env.*
+!.env.example
+.ruff_cache/

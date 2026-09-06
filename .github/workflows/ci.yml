@@ -25,7 +25,7 @@ jobs:
       - run: uv build
       - name: Installed wheel smoke
         shell: bash
-        run: uv run --no-project --with "$(find dist -name '*.whl' -print -quit)" python scripts/smoke_protocol.py
+        run: uv run --no-project --python "${{ matrix.python }}" --with "$(find dist -name '*.whl' -print -quit)" python scripts/smoke_protocol.py
   docker:
     runs-on: ubuntu-latest
     steps:

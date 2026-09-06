@@ -169,7 +169,11 @@ class SapController:
         return self.get_screen()
 
     def _window(self, *, main=False):
+        import ctypes
         import win32gui
+
+        # Match MSS physical pixels on each monitor; COM work stays on this STA thread.
+        ctypes.windll.user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
 
         session = self._session()
         window = session.FindById("wnd[0]") if main else session.ActiveWindow

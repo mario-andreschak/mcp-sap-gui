@@ -1,3 +1,11 @@
+# 0.2.0 — 2026 MCP repair
+
+- Public MCP SDK2.1.1 modern/legacy stdio; supported Python metadata, lockfile, wheel/bin and source Docker build.
+- Exact SAP session identity, local SSO and optional COM login; no global process termination or password command arguments.
+- COM screen text, typed field/button/key tools and explicit per-window GuiXT InputScript submission.
+- Serialized STA worker cancellation/deadline, safe execution errors, password redaction and scoped screenshot output.
+- Mocked, wire, wheel, native-window and CI coverage. Real SAP/SSO/GuiXT acceptance remains environment-dependent; see README.
+
 # Changelog
 
 ## 0.1.3 (2025-02-21)

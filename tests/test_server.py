@@ -1,212 +1,105 @@
-import pytest
-import pytest_asyncio
 import asyncio
-import json
-from sap_gui_server.server import SapGuiServer
-import mcp.types as types
 import base64
-from PIL import Image
 from io import BytesIO
-import os
-import time
+from PIL import Image
+import pytest
+from sap_gui_server.config import Config, SapError
+from sap_gui_server.server import SapGuiServer
+from sap_gui_server.worker import SapWorker
+from tests.fake_worker import hang, echo
 
-class TestSapGuiServer:
-    @pytest_asyncio.fixture(scope="function")
-    async def server(self):
-        """Create a fresh SapGuiServer instance for each test."""
-        server = SapGuiServer()
-        try:
-            yield server
-        finally:
-            # Cleanup
-            if hasattr(server, 'sap') and server.sap:
-                try:
-                    server.sap.end_session()
-                except:
-                    pass
 
-    def verify_screenshot(self, screenshot_base64: str) -> bool:
-        """Helper to verify a screenshot is valid."""
-        try:
-            image_data = base64.b64decode(screenshot_base64)
-            print(f"Screenshot VERIFICATION: {screenshot_base64}")
+class Fake:
+    def __init__(self, result=None, error=None):
+        self.calls = []
+        self.result = result or {"status": "ok"}
+        self.error = error
 
-            image = Image.open(BytesIO(image_data))
-            width, height = image.size
-            return width > 0 and height > 0
-        except Exception as e:
-            print(f"Screenshot verification failed: {str(e)}")
-            return False
+    async def call(self, method, args):
+        self.calls.append((method, args))
+        if self.error:
+            raise self.error
+        return dict(self.result)
 
-    @pytest.mark.asyncio
-    async def test_list_tools(self, server: SapGuiServer):
-        """Test tool listing functionality."""
-        # Get the decorated function
-        tools = await server.handle_list_tools()
-        
-        # Verify all expected tools are present
-        tool_names = [tool.name for tool in tools]
-        expected_tools = [
-            "launch_transaction",
-            "sap_click",
-            "sap_move_mouse",
-            "sap_type",
-            "sap_scroll",
-            "end_transaction",
-            "save_last_screenshot"
-        ]
-        
-        for tool in expected_tools:
-            assert tool in tool_names
+    async def close(self):
+        pass
 
-    @pytest.mark.asyncio
-    async def test_launch_transaction_tool(self, server: SapGuiServer):
-        """Test launch_transaction tool."""
-        result = await server.handle_call_tool("launch_transaction", {"transaction": "MM03"})
-        print(f"Result from launch_transaction: {result}")
-        # Verify response
-        assert len(result) > 0
-        for content in result:
-            if isinstance(content, types.ImageContent):
-                assert self.verify_screenshot(content.data)
-        
-        time.sleep(5)
 
-    @pytest.mark.asyncio
-    async def test_launch_transaction_no_screenshot(self, server: SapGuiServer):
-        """Test launch_transaction tool without screenshot."""
-        result = await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": False})
-        # Verify no ImageContent is returned
-        assert not any(isinstance(content, types.ImageContent) for content in result)
+async def test_catalog_preserves_original_tools_and_adds_control_paths():
+    s = SapGuiServer(worker=Fake())
+    tools = await s.server.list_tools()
+    names = {t.name for t in tools}
+    assert names == {
+        "launch_transaction",
+        "sap_click",
+        "sap_move_mouse",
+        "sap_type",
+        "sap_scroll",
+        "end_transaction",
+        "save_last_screenshot",
+        "sap_get_screen",
+        "sap_set_field",
+        "sap_press",
+        "sap_send_vkey",
+        "sap_run_guixt_script",
+    }
+    with pytest.raises(Exception):
+        await s.server.call_tool("sap_click", {"x": -1, "y": 0})
+    assert not s.worker.calls
 
-    @pytest.mark.asyncio
-    async def test_mouse_interaction_tools(self,  server: SapGuiServer):
-        """Test mouse movement and clicking tools."""
-        # First launch a transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": True})
-        time.sleep(5)
-        
-        # Test mouse movement
-        move_result = await server.handle_call_tool("sap_move_mouse", {"x": 100, "y": 100, "include_screenshot": True})
-        assert any(isinstance(content, types.ImageContent) for content in move_result)
-        
-        # Test clicking
-        click_result = await server.handle_call_tool("sap_click", {"x": 100, "y": 100, "include_screenshot": True})
-        assert any(isinstance(content, types.ImageContent) for content in click_result)
 
-    @pytest.mark.asyncio
-    async def test_mouse_interaction_tools_no_screenshot(self, server: SapGuiServer):
-        """Test mouse movement and clicking tools without screenshot."""
-        # First launch a transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": False})
-        time.sleep(5)
+async def test_execution_errors_are_marked_and_raw_exception_is_scrubbed():
+    s = SapGuiServer(worker=Fake(error=RuntimeError("secret-canary")))
+    result = await s.server.call_tool("end_transaction", {})
+    assert result.is_error
+    assert "secret-canary" not in str(result)
+    s.worker.error = SapError("Complete SSO login")
+    result = await s.server.call_tool("end_transaction", {})
+    assert result.is_error and "Complete SSO" in result.content[0].text
 
-        # Test mouse movement
-        move_result = await server.handle_call_tool("sap_move_mouse", {"x": 100, "y": 100, "include_screenshot": False})
-        assert not any(isinstance(content, types.ImageContent) for content in move_result)
 
-        # Test clicking
-        click_result = await server.handle_call_tool("sap_click", {"x": 100, "y": 100, "include_screenshot": False})
-        assert not any(isinstance(content, types.ImageContent) for content in click_result)
+async def test_screenshot_blob_and_output_jailed_before_side_effect(tmp_path):
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2)).save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    worker = Fake(result={"status": "ok", "image": encoded})
+    s = SapGuiServer(Config(output_root=str(tmp_path)), worker=worker)
+    r = await s.server.call_tool("sap_get_screen", {"return_screenshot": "as_imageurl"})
+    assert r.content[1].resource.blob == encoded
+    assert r.content[1].resource.mime_type == "image/png"
+    r = await s.server.call_tool("save_last_screenshot", {"filename": "capture.png"})
+    assert not r.is_error and (tmp_path / "capture.png").is_file()
+    r = await s.server.call_tool("save_last_screenshot", {"filename": "capture.png"})
+    assert r.is_error
+    count = len(worker.calls)
+    r = await s.server.call_tool(
+        "sap_click", {"x": 0, "y": 0, "return_screenshot": "as_file", "as_file_target_folder": "../escape"}
+    )
+    assert r.is_error and len(worker.calls) == count
 
-    @pytest.mark.asyncio
-    async def test_keyboard_input_tool(self, server: SapGuiServer):
-        """Test keyboard input tool."""
-        # Launch transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": True})
-        time.sleep(5)
-        
-        # Type text
-        type_result = await server.handle_call_tool("sap_type", {"text": "100-100", "include_screenshot": True})
-        assert any(isinstance(content, types.ImageContent) for content in type_result)
 
-    @pytest.mark.asyncio
-    async def test_keyboard_input_tool_no_screenshot(self, server: SapGuiServer):
-        """Test keyboard input tool without screenshot."""
-        # Launch transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": False})
-        time.sleep(5)
+async def test_worker_actual_spawn_and_orderly_release():
+    worker = SapWorker(Config(timeout=4), target=echo)
+    assert await worker.call("one", {}) == {"method": "one"}
+    assert await worker.call("two", {}) == {"method": "two"}
+    await worker.close()
+    assert worker.process is None
 
-        # Type text
-        type_result = await server.handle_call_tool("sap_type", {"text": "100-100", "include_screenshot": False})
-        assert not any(isinstance(content, types.ImageContent) for content in type_result)
 
-    @pytest.mark.asyncio
-    async def test_scroll_tool(self, server: SapGuiServer):
-        """Test scrolling tool."""
-        # Launch transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": True})
-        time.sleep(5)
-        
-        # Test scroll down
-        scroll_down = await server.handle_call_tool("sap_scroll", {"direction": "down", "include_screenshot": True})
-        assert any(isinstance(content, types.ImageContent) for content in scroll_down)
-        
-        time.sleep(1)
-        
-        # Test scroll up
-        scroll_up = await server.handle_call_tool("sap_scroll", {"direction": "up", "include_screenshot": True})
-        assert any(isinstance(content, types.ImageContent) for content in scroll_up)
+async def test_worker_timeout_terminates_only_owned_worker_and_refuses_retry():
+    worker = SapWorker(Config(timeout=0.4), target=hang)
+    with pytest.raises(TimeoutError):
+        await worker.call("hang", {})
+    assert worker.process is None and worker.tainted
+    with pytest.raises(SapError, match="previous operation"):
+        await worker.call("again", {})
 
-    @pytest.mark.asyncio
-    async def test_scroll_tool_no_screenshot(self, server: SapGuiServer):
-        """Test scrolling tool without screenshot."""
-        # Launch transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": False})
-        time.sleep(5)
 
-        # Test scroll down
-        scroll_down = await server.handle_call_tool("sap_scroll", {"direction": "down", "include_screenshot": False})
-        assert not any(isinstance(content, types.ImageContent) for content in scroll_down)
-
-        time.sleep(1)
-
-        # Test scroll up
-        scroll_up = await server.handle_call_tool("sap_scroll", {"direction": "up", "include_screenshot": False})
-        assert not any(isinstance(content, types.ImageContent) for content in scroll_up)
-
-    @pytest.mark.asyncio
-    async def test_end_transaction_tool(self, server: SapGuiServer):
-        """Test end_transaction tool."""
-        # First launch a transaction
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03"})
-        time.sleep(5)
-        
-        # End transaction
-        end_result = await server.handle_call_tool("end_transaction", {})
-        assert any(isinstance(content, types.TextContent) for content in end_result)
-
-    @pytest.mark.asyncio
-    async def test_save_screenshot_tool(self, server: SapGuiServer):
-        """Test save_screenshot tool and verify absolute path."""
-        # Launch transaction to get a screenshot
-        await server.handle_call_tool("launch_transaction", {"transaction": "MM03", "include_screenshot": True})
-        time.sleep(5)
-        
-        # Save screenshot
-        filename = "test_screenshot.png"
-        save_result = await server.handle_call_tool("save_last_screenshot", {"filename": filename})
-        
-        # Verify file was created and path is absolute
-        assert len(save_result) == 1
-        assert isinstance(save_result[0], types.TextContent)
-        saved_path = save_result[0].text.replace("Screenshot saved to ", "")
-        assert os.path.isabs(saved_path)
-        assert os.path.exists(saved_path)
-
-        try:
-            # Clean up
-            os.remove(saved_path)
-        except:
-            pass
-
-    @pytest.mark.asyncio
-    async def test_error_handling(self, server: SapGuiServer):
-        """Test error handling with invalid inputs."""
-        # Test invalid transaction code
-        with pytest.raises(Exception):
-            await server.handle_call_tool("launch_transaction", {"transaction": "INVALID"})
-        
-        # Test invalid coordinates
-        with pytest.raises(Exception):
-            await server.handle_call_tool("sap_click", {"x": -1, "y": -1})
+async def test_worker_cancellation_cannot_leave_queued_input_running():
+    worker = SapWorker(Config(timeout=5), target=hang)
+    task = asyncio.create_task(worker.call("hang", {}))
+    await asyncio.sleep(0.25)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert worker.tainted and worker.process is None

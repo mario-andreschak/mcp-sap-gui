@@ -1,7 +1,1 @@
-pyautogui>=0.9.54
-pywin32>=306
-psutil>=5.9.5
-python-dotenv>=1.0.0
-mss>=9.0.1
-Pillow>=10.0.0
-mcp>=1.2.1
+.

@@ -1,5 +1,5 @@
-pytest>=8.3.4
-pytest-asyncio>=0.25.3
-pytest-cov>=6.0.0
-black>=24.0.0  # for code formatting
-flake8>=7.0.0  # for linting
+-e .
+pytest>=8.4,<10
+pytest-asyncio>=1.1,<2
+ruff>=0.12,<1
+build>=1.2,<2

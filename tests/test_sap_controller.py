@@ -1,170 +1,180 @@
-import os
-import time
+from types import SimpleNamespace
+from unittest.mock import Mock
+import sys
 import pytest
+from sap_gui_server.config import Config, SapError, jailed_path
 from sap_gui_server.sap_controller import SapController
-import base64
-from PIL import Image
-from io import BytesIO
 
-class TestSapController:
-    @pytest.fixture(scope="function")
-    def controller(self):
-        """Create a fresh SapController instance for each test."""
-        controller = SapController()
-        yield controller
-        # Cleanup after each test
-        try:
-            controller.end_session()
-        except:
-            pass
 
-    def verify_and_save_screenshot(self, screenshot_base64: str, filename: str) -> bool:
-        """Helper to verify a screenshot is valid and save it."""
-        try:
-            # Create test_screenshots directory if it doesn't exist
-            screenshots_dir = "test_screenshots"
-            if not os.path.exists(screenshots_dir):
-                os.makedirs(screenshots_dir)
-            
-            # Decode base64 to image
-            image_data = base64.b64decode(screenshot_base64)
-            image = Image.open(BytesIO(image_data))
-            
-            # Check if image is valid and has content
-            width, height = image.size
-            if width > 0 and height > 0:
-                # Save the image
-                filepath = os.path.join(screenshots_dir, filename)
-                image.save(filepath)
-                print(f"Screenshot saved to: {filepath}")
-                return True
-            return False
-        except Exception as e:
-            print(f"Screenshot verification failed: {str(e)}")
-            return False
+class Children:
+    def __init__(self, items):
+        self.items = items
+        self.Count = len(items)
 
-    def test_initialization(self, controller):
-        """Test controller initialization."""
-        assert controller._initialized is False
-        assert controller._dpi_scale > 0
-        assert controller._current_process is None
+    def __call__(self, n):
+        return self.items[n]
 
-    def test_launch_transaction(self, controller):
-        """Test launching a SAP transaction."""
-        # Launch a simple transaction (e.g., MM03 - Display Material)
-        result = controller.launch_transaction("MM03")
-        print("launch_transaction result: ")
-        print(result)
-        # Verify response includes image
-        assert "image" in result
-        assert self.verify_and_save_screenshot(result["image"], "launch_transaction.png")
-        
-        # Verify window text can be retrieved separately
-        window_text = controller._get_window_text()
-        assert "main_text" in window_text
-        assert "error_messages" in window_text
-        assert "status_messages" in window_text
-        assert "field_values" in window_text
-        
-        # Give time for SAP GUI to fully load
-        time.sleep(5)
 
-    def test_invalid_transaction(self, controller):
-        """Test launching an invalid transaction to verify error capture."""
-        # Launch an invalid transaction
-        try:
-            controller.launch_transaction("INVALID")
-            assert False, "Should have raised an exception"
-        except Exception as e:
-            # Get the last window text before the error
-            window_text = controller._get_window_text()
-            
-            # Verify error was captured in window text
-            assert any("does not exist" in msg.lower() for msg in window_text["error_messages"])
+def fixture(user="ALICE"):
+    password = SimpleNamespace(
+        Id="/app/con[3]/ses[2]/wnd[0]/pwd",
+        Type="GuiPasswordField",
+        Name="password",
+        Text="secret-canary",
+        Children=Children([]),
+    )
+    field = SimpleNamespace(
+        Id="/app/con[3]/ses[2]/wnd[0]/usr/txt",
+        Type="GuiTextField",
+        Name="field",
+        Text="Hello",
+        Children=Children([]),
+    )
+    session = SimpleNamespace(
+        Id="/app/con[3]/ses[2]",
+        Type="GuiSession",
+        Name="ses[2]",
+        Busy=False,
+        Info=SimpleNamespace(User=user),
+        Children=Children([password, field]),
+        StartTransaction=Mock(),
+        EndTransaction=Mock(),
+        FindById=Mock(return_value=field),
+        ActiveWindow=SimpleNamespace(Handle=900),
+    )
+    app = SimpleNamespace(
+        FindById=Mock(return_value=session),
+        OpenConnection=Mock(return_value=SimpleNamespace(Children=Children([session]))),
+    )
+    return app, session, field
 
-    def test_mouse_interactions(self, controller):
-        """Test mouse movement and clicking."""
-        # First launch a transaction
-        controller.launch_transaction("MM03")
-        time.sleep(5)
-        
-        # Test mouse movement with smaller coordinates
-        move_result = controller.move_mouse(30, 10)
-        assert "image" in move_result
-        assert self.verify_and_save_screenshot(move_result["image"], "mouse_move.png")
-        
-        # Test clicking with smaller coordinates
-        click_result = controller.click_position(40, 10)
-        assert "image" in click_result
-        assert self.verify_and_save_screenshot(click_result["image"], "mouse_click.png")
 
-    def test_keyboard_input(self, controller):
-        """Test keyboard input functionality including special keys."""
-        # Launch transaction
-        controller.launch_transaction("SE93")
-        time.sleep(5)
-        
-        # Test regular text input
-        type_result = controller.type_text("SE93")
-        assert "image" in type_result
-        assert self.verify_and_save_screenshot(type_result["image"], "keyboard_type.png")
-        
-        # Test Enter key (using tilde)
-        enter_result = controller.type_text("{ENTER}")
-        assert "image" in enter_result
-        assert self.verify_and_save_screenshot(enter_result["image"], "keyboard_enter.png")
-        
-        # Test function key
-        f3_result = controller.type_text("{F3}")
-        assert "image" in f3_result
-        assert self.verify_and_save_screenshot(f3_result["image"], "keyboard_f3.png")
-        
-    def test_scrolling(self, controller):
-        """Test screen scrolling."""
-        # Launch transaction
-        controller.launch_transaction("SCC4")
-        time.sleep(5)
-        
-        # Test scrolling down
-        scroll_down = controller.scroll_screen("down")
-        assert "image" in scroll_down
-        assert self.verify_and_save_screenshot(scroll_down["image"], "scroll_down.png")
-        
-        time.sleep(1)
-        
-        # Test scrolling up
-        scroll_up = controller.scroll_screen("up")
-        assert "image" in scroll_up
-        assert self.verify_and_save_screenshot(scroll_up["image"], "scroll_up.png")
+def test_exact_sso_session_preserves_other_sessions_and_has_no_password():
+    app, session, _ = fixture()
+    c = SapController(Config(session_id=session.Id), application=app)
+    c.launch_transaction("SE16")
+    c.end_session()
+    app.FindById.assert_called_once_with(session.Id)
+    app.OpenConnection.assert_not_called()
+    session.StartTransaction.assert_called_once_with("SE16")
+    session.EndTransaction.assert_called_once()
+    c.close()
+    session.EndTransaction.assert_called_once()
 
-    def test_end_session(self, controller):
-        """Test ending SAP session."""
-        # Launch a transaction first
-        controller.launch_transaction("MM03")
-        time.sleep(5)
-        
-        # End session
-        controller.end_session()
-        time.sleep(2)  # Give time for process to terminate
-        
-        # Verify cleanup - check if process is terminated
-        if controller._current_process:
-            try:
-                # This should raise psutil.NoSuchProcess if process is terminated
-                controller._current_process.status()
-                assert False, "Process should be terminated"
-            except:
-                pass  # Expected - process is terminated
 
-    def test_screenshot_functionality(self, controller):
-        """Test screenshot capture functionality."""
-        # Launch transaction
-        controller.launch_transaction("MM03")
-        time.sleep(5)
-        
-        # Take screenshot
-        screenshot = controller._take_screenshot()
-        
-        # Verify screenshot
-        # assert screenshot is not None
-        # assert self.verify_screenshot(screenshot)
+def test_no_arbitrary_existing_session_and_identity_assertion():
+    app, session, _ = fixture()
+    with pytest.raises(SapError, match="Configure exact"):
+        SapController(Config(), application=app).get_screen()
+    with pytest.raises(SapError, match="does not match"):
+        SapController(Config(session_id=session.Id, user="BOB"), application=app).launch_transaction("SE16")
+    session.StartTransaction.assert_not_called()
+
+
+def test_new_connection_sso_and_control_text_reads():
+    app, session, field = fixture()
+    c = SapController(Config(connection="Development SSO"), application=app)
+    screen = c.get_screen()
+    app.OpenConnection.assert_called_once_with("Development SSO", True)
+    assert "secret-canary" not in str(screen)
+    assert "Hello" in str(screen)
+    c.set_field("wnd[0]/usr/txt", "literal{ENTER}")
+    assert field.Text == "literal{ENTER}"
+
+
+def test_existing_session_never_receives_login_credentials():
+    app, session, _ = fixture(user="")
+    c = SapController(Config(session_id=session.Id, user="ALICE", password="do-not-send"), application=app)
+    with pytest.raises(SapError, match="Complete SSO"):
+        c.get_screen()
+    session.FindById.assert_not_called()
+
+
+@pytest.mark.parametrize("element", ["/app/con[0]/ses[0]/wnd[0]", "wnd[0]/../wnd[1]", "wnd[0]\n"])
+def test_cross_session_control_ids_rejected(element):
+    app, session, _ = fixture()
+    c = SapController(Config(session_id=session.Id), application=app)
+    with pytest.raises(SapError):
+        c.set_field(element, "text")
+    app.FindById.assert_not_called()
+
+
+def test_root_boundary_and_symlink(tmp_path):
+    base = tmp_path / "safe"
+    base.mkdir()
+    outside = tmp_path / "safe-evil"
+    outside.mkdir()
+    assert jailed_path(str(base), "new.png") == base / "new.png"
+    with pytest.raises(SapError):
+        jailed_path(str(base), str(outside / "x.png"))
+    try:
+        (base / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("OS does not permit test symlinks")
+    with pytest.raises(SapError):
+        jailed_path(str(base), "link/x.png")
+
+
+def test_guixt_targets_exact_hwnd_and_rejects_command_injection(tmp_path, monkeypatch):
+    app, session, _ = fixture()
+    executable = tmp_path / "guixt.exe"
+    executable.write_bytes(b"")
+    script = tmp_path / "reviewed.txt"
+    script.write_text("Return")
+    c = SapController(
+        Config(session_id=session.Id, guixt_root=str(tmp_path), guixt_path=str(executable)), application=app
+    )
+    window = Mock(return_value=900)
+    monkeypatch.setattr(c, "_window", window)
+    run = Mock()
+    monkeypatch.setattr("sap_gui_server.sap_controller.subprocess.run", run)
+    assert c.run_guixt("reviewed.txt")["status"] == "submitted"
+    window.assert_called_once_with(main=True)
+    args = run.call_args.args[0]
+    assert args == [str(executable), "findsession=hwnd:'900'", f"input=OK:process={script}"]
+    with pytest.raises(SapError):
+        c.run_guixt("reviewed.txt;OK:/nSE16")
+    assert run.call_count == 1
+
+
+def test_config_hides_password_and_rejects_invalid_timeout(monkeypatch):
+    assert "canary" not in repr(Config(password="canary"))
+    monkeypatch.setenv("SAP_OPERATION_TIMEOUT", "nan")
+    with pytest.raises(SapError):
+        Config.from_env()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows binding/window check")
+def test_native_windows_screenshot_of_disposable_window():
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    import win32gui
+    import win32con
+    import pythoncom
+    import pyautogui
+
+    assert pyautogui is not None and pythoncom is not None
+    app, session, _ = fixture()
+    hwnd = win32gui.CreateWindowEx(
+        0,
+        "STATIC",
+        "MCP SAP disposable test window",
+        win32con.WS_OVERLAPPEDWINDOW | win32con.WS_VISIBLE,
+        100,
+        100,
+        400,
+        220,
+        0,
+        0,
+        0,
+        None,
+    )
+    try:
+        session.ActiveWindow.Handle = hwnd
+        c = SapController(Config(session_id=session.Id), application=app)
+        picture = Image.open(BytesIO(base64.b64decode(c.screenshot())))
+        assert picture.size == (400, 220)
+        assert picture.format == "PNG"
+    finally:
+        win32gui.DestroyWindow(hwnd)

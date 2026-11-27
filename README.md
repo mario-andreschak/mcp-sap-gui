@@ -1,3 +1,5 @@
+Also check: https://github.com/DidroAI/sap-ui-mcp 
+
 # MCP SAP GUI
 
 MCP tools for one configured **SAP GUI for Windows** session. This repair uses Python MCP SDK 2.1.1 and serves both the published 2026-07-28 protocol (`server/discover`) and legacy initialization over stdio. The original seven tool names remain available; COM control tools and optional GuiXT InputScripts add alternatives to image recognition.

@@ -1,4 +1,5 @@
-Also check: https://github.com/DidroAI/sap-ui-mcp 
+> [!TIP]
+> this server receives updates only sporadically. Make sure to check: https://github.com/DidroAI/sap-ui-mcp 
 
 # MCP SAP GUI
 
